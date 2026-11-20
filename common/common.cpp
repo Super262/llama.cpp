@@ -63,6 +63,10 @@
 #include <sys/systemcfg.h>
 #endif
 
+#if defined(__linux__)
+#include <sys/mman.h>
+#endif
+
 #if defined(_MSC_VER)
 #pragma warning(disable: 4244 4267) // possible loss of data
 #endif
@@ -2421,6 +2425,70 @@ bool common_prompt_batch_decode(
     return true;
 }
 
+void common_state_data::mapping_deleter::operator()(uint8_t * ptr) const noexcept {
+#if defined(__linux__) && defined(MADV_HUGEPAGE)
+    munmap(ptr, size);
+#else
+    (void) ptr;
+#endif
+}
+
+common_state_data::mapping_ptr common_state_data::map_hugepage(size_t size) {
+#if defined(__linux__) && defined(MADV_HUGEPAGE)
+    static const size_t page_size = [] {
+        size_t size = 0;
+        std::ifstream file("/sys/kernel/mm/transparent_hugepage/hpage_pmd_size");
+        return (file >> size) ? size : 0;
+    }();
+    if (page_size == 0 || size < page_size) {
+        return mapping_ptr{nullptr, {0}};
+    }
+
+    void * addr = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (addr == MAP_FAILED) {
+        return mapping_ptr{nullptr, {0}};
+    }
+
+    // The advice is released with the mapping, including on failure.
+    mapping_ptr result{static_cast<uint8_t *>(addr), {size}};
+    const size_t offset = (page_size - reinterpret_cast<uintptr_t>(addr) % page_size) % page_size;
+    const size_t advised_size = (size - offset) / page_size * page_size;
+    if (advised_size == 0 || madvise(result.get() + offset, advised_size, MADV_HUGEPAGE) != 0) {
+        return mapping_ptr{nullptr, {0}};
+    }
+    return result;
+#else
+    (void) size;
+    return mapping_ptr{nullptr, {0}};
+#endif
+}
+
+void common_state_data::resize(size_t size, bool use_thp) {
+    if (use_thp && size <= bytes.max_size()) {
+        if (mapping && size == this->size()) {
+            return;
+        }
+        if (auto next = map_hugepage(size)) {
+            const size_t kept = std::min(size, this->size());
+            if (kept > 0) {
+                memcpy(next.get(), data(), kept);
+            }
+            decltype(bytes){}.swap(bytes);
+            mapping = std::move(next);
+            return;
+        }
+    }
+
+    bytes.resize(size);
+    if (mapping) {
+        const size_t kept = std::min(size, mapping.get_deleter().size);
+        if (kept > 0) {
+            memcpy(bytes.data(), mapping.get(), kept);
+        }
+        mapping.reset();
+    }
+}
+
 size_t common_prompt_checkpoint::size() const {
     return data_tgt.size() + data_dft.size() + data_spec.size();
 }
@@ -2452,14 +2520,15 @@ void common_prompt_checkpoint::update_pos(
 void common_prompt_checkpoint::update_tgt(
         llama_context * ctx,
         llama_seq_id seq_id,
-        llama_state_seq_flags flags) {
+        llama_state_seq_flags flags,
+        bool use_thp) {
     if (ctx == nullptr) {
         return;
     }
 
     const size_t ckpt_size = llama_state_seq_get_size_ext(ctx, seq_id, flags);
 
-    data_tgt.resize(ckpt_size);
+    data_tgt.resize(ckpt_size, use_thp);
 
     const size_t n = llama_state_seq_get_data_ext(ctx, data_tgt.data(), ckpt_size, seq_id, flags);
     if (n != ckpt_size) {
@@ -2470,14 +2539,15 @@ void common_prompt_checkpoint::update_tgt(
 void common_prompt_checkpoint::update_dft(
         llama_context * ctx,
         llama_seq_id seq_id,
-        llama_state_seq_flags flags) {
+        llama_state_seq_flags flags,
+        bool use_thp) {
     if (ctx == nullptr) {
         return;
     }
 
     const size_t ckpt_size = llama_state_seq_get_size_ext(ctx, seq_id, flags);
 
-    data_dft.resize(ckpt_size);
+    data_dft.resize(ckpt_size, use_thp);
 
     const size_t n = llama_state_seq_get_data_ext(ctx, data_dft.data(), ckpt_size, seq_id, flags);
     if (n != ckpt_size) {

@@ -936,6 +936,30 @@ static void test_pcm_f32_to_s16(testing & t) {
     t.assert_true ("empty",          pcm_f32_to_s16(nullptr, 0).empty());
 }
 
+static void test_saved_state_buffer(testing & t) {
+    constexpr size_t original_size = 8 * 1024 * 1024;
+    for (const bool use_thp : {false, true}) {
+        t.test(use_thp ? "hugepage enabled" : "regular allocation", [&](testing & t) {
+            common_state_data data;
+            data.resize(original_size, use_thp);
+            memset(data.data(), 0x5a, data.size());
+
+            data.resize(original_size + 4096, use_thp);
+            t.assert_equal("size after growth", original_size + 4096, data.size());
+            t.assert_equal("prefix kept after growth", 0x5a, int(data.data()[original_size - 1]));
+
+            common_state_data moved = std::move(data);
+            moved.resize(17);
+            t.assert_equal("size after shrink", (size_t) 17, moved.size());
+            t.assert_equal("prefix kept after shrink", 0x5a, int(moved.data()[16]));
+
+            moved.clear();
+            moved.shrink_to_fit();
+            t.assert_true("cleared buffer is empty", moved.empty());
+        });
+    }
+}
+
 int main(int argc, char ** argv) {
     testing t;
 
@@ -954,6 +978,7 @@ int main(int argc, char ** argv) {
     t.test("json_helpers",  test_json_helpers);
     t.test("lora_helpers",  test_lora_helpers);
     t.test("server_prompt_reuse", test_server_prompt_reuse);
+    t.test("saved_state_buffer", test_saved_state_buffer);
     t.test("server_pipe",   test_server_pipe);
     t.test("decision_escape", test_decision_escape);
     t.test("rerank_template", test_rerank_template);

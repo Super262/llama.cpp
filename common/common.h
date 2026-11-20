@@ -16,6 +16,7 @@
 #include <string_view>
 #include <vector>
 #include <map>
+#include <memory>
 #include <algorithm>
 #include <filesystem>
 #include <fstream>
@@ -1335,7 +1336,35 @@ struct common_no_init_allocator : std::allocator<T> {
 };
 
 // sequence state data, filled by llama_state_seq_get_data_ext()
-using common_state_data = std::vector<uint8_t, common_no_init_allocator<uint8_t>>;
+class common_state_data {
+    struct mapping_deleter {
+        size_t size = 0;
+
+        void operator()(uint8_t * ptr) const noexcept;
+    };
+
+    using mapping_ptr = std::unique_ptr<uint8_t, mapping_deleter>;
+
+    std::vector<uint8_t, common_no_init_allocator<uint8_t>> bytes;
+    mapping_ptr mapping{nullptr, {0}};
+
+    static mapping_ptr map_hugepage(size_t size);
+
+public:
+    void resize(size_t size, bool use_thp = false);
+
+    uint8_t * data() { return mapping ? mapping.get() : bytes.data(); }
+    const uint8_t * data() const { return mapping ? mapping.get() : bytes.data(); }
+    size_t size() const { return mapping ? mapping.get_deleter().size : bytes.size(); }
+    bool empty() const { return size() == 0; }
+
+    void clear() {
+        mapping.reset();
+        bytes.clear();
+    }
+
+    void shrink_to_fit() { bytes.shrink_to_fit(); }
+};
 
 struct common_prompt_checkpoint {
     int64_t n_tokens;
@@ -1366,12 +1395,14 @@ struct common_prompt_checkpoint {
     void update_tgt(
             llama_context * ctx,
             llama_seq_id seq_id,
-            llama_state_seq_flags flags);
+            llama_state_seq_flags flags,
+            bool use_thp = false);
 
     void update_dft(
             llama_context * ctx,
             llama_seq_id seq_id,
-            llama_state_seq_flags flags);
+            llama_state_seq_flags flags,
+            bool use_thp = false);
 
     // return false if the state could not be restored
     bool load_tgt(

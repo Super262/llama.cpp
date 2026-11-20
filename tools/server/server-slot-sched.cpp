@@ -81,7 +81,7 @@ size_t server_prompt_cache::n_tokens() const {
     return res;
 }
 
-server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & prompt, size_t state_size_tgt, size_t state_size_dft) {
+server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & prompt, size_t state_size_tgt, size_t state_size_dft, bool use_thp) {
     // first check if the current state is contained fully in the cache
     for (auto it = states.begin(); it != states.end(); ++it) {
         const int cur_lcp_len = it->prompt.tokens.get_common_prefix(prompt.tokens);
@@ -121,7 +121,7 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
     }
 
     if (limit_size > 0) {
-        // make room before allocating the new vectors to avoid breaching the limit
+        // make room before allocating the new state to avoid breaching the limit
         while (!states.empty() && size() + state_size_new > limit_size) {
             SRV_WRN(" - making room for prompt cache entry, removing oldest entry (size = %.3f MiB)\n",
                     states.front().size() / (1024.0 * 1024.0));
@@ -135,8 +135,8 @@ server_prompt_cache_state * server_prompt_cache::alloc(const server_prompt & pro
 
     // check if we can allocate enough memory for the new state
     try {
-        state_data_tgt.resize(state_size_tgt);
-        state_data_dft.resize(state_size_dft);
+        state_data_tgt.resize(state_size_tgt, use_thp);
+        state_data_dft.resize(state_size_dft, use_thp);
     } catch (const std::bad_alloc & e) {
         SRV_ERR("failed to allocate memory for prompt cache state: %s\n", e.what());
 
